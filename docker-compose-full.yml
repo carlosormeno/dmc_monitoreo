@@ -1,0 +1,202 @@
+version: '3.8'
+
+# Uso: podman-compose -f docker-compose-full.yml up -d
+
+services:
+
+  # ─── Infraestructura de Monitoreo ───────────────────────────────────────────
+
+  prometheus:
+    image: docker.io/prom/prometheus:v2.51.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./alert-rules.yml:/etc/prometheus/alert-rules.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  node_exporter:
+    image: docker.io/prom/node-exporter:v1.7.0
+    container_name: node_exporter
+    ports:
+      - "9100:9100"
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  alertmanager:
+    image: docker.io/prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml
+      - alertmanager-data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  grafana:
+    image: docker.io/grafana/grafana:10.4.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    restart: unless-stopped
+    networks:
+      - monitoring
+    depends_on:
+      - prometheus
+      - loki
+      - jaeger
+
+  # ─── Logs (Loki + Promtail) ─────────────────────────────────────────────────
+
+  loki:
+    image: docker.io/grafana/loki:2.9.0
+    container_name: loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki-config.yml:/etc/loki/local-config.yaml
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  promtail:
+    image: docker.io/grafana/promtail:2.9.0
+    container_name: promtail
+    volumes:
+      - ./promtail-config.yml:/etc/promtail/config.yml
+      - logs-data:/var/log/services:ro
+    command: -config.file=/etc/promtail/config.yml
+    restart: unless-stopped
+    depends_on:
+      - loki
+    networks:
+      - monitoring
+
+  # ─── Traces (Jaeger) ────────────────────────────────────────────────────────
+
+  jaeger:
+    image: docker.io/jaegertracing/all-in-one:1.55
+    container_name: jaeger
+    ports:
+      - "16686:16686"   # UI
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # ─── CVE Exporter (Bonus) ───────────────────────────────────────────────────
+
+  cve-exporter:
+    build:
+      context: ./services
+      dockerfile: Dockerfile
+    container_name: cve-exporter
+    command: python cve-exporter.py
+    ports:
+      - "5003:5003"
+    environment:
+      - REPORTS_DIR=/security-reports
+    volumes:
+      - ./security-reports:/security-reports:ro
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # ─── Microservicios ─────────────────────────────────────────────────────────
+
+  api-gateway:
+    build:
+      context: ./services
+      dockerfile: Dockerfile
+    container_name: api-gateway
+    command: python api-gateway.py
+    ports:
+      - "8080:5000"  # 5000 ocupado por AirPlay en macOS
+    environment:
+      - AUTH_SERVICE_URL=http://auth-service:5001
+      - DATA_SERVICE_URL=http://data-service:5002
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+    volumes:
+      - logs-data:/var/log/services
+    restart: unless-stopped
+    depends_on:
+      - auth-service
+      - data-service
+      - jaeger
+    networks:
+      - monitoring
+
+  auth-service:
+    build:
+      context: ./services
+      dockerfile: Dockerfile
+    container_name: auth-service
+    command: python auth-service.py
+    ports:
+      - "5001:5001"
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+    volumes:
+      - logs-data:/var/log/services
+    restart: unless-stopped
+    depends_on:
+      - jaeger
+    networks:
+      - monitoring
+
+  data-service:
+    build:
+      context: ./services
+      dockerfile: Dockerfile
+    container_name: data-service
+    command: python data-service.py
+    ports:
+      - "5002:5002"
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+    volumes:
+      - logs-data:/var/log/services
+    restart: unless-stopped
+    depends_on:
+      - jaeger
+    networks:
+      - monitoring
+
+networks:
+  monitoring:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
+  loki-data:
+  logs-data:

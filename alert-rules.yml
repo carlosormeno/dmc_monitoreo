@@ -1,0 +1,102 @@
+groups:
+
+  # ─── Recording Rules: Microservicios ────────────────────────────────────────
+  - name: microservices_recording_rules
+    interval: 30s
+    rules:
+      # Regla 1: Tasa de error (ratio) en ventana de 5m
+      - record: job:gateway_error_rate:ratio5m
+        expr: |
+          sum(rate(gateway_requests_total{status=~"5.."}[5m]))
+          / sum(rate(gateway_requests_total[5m]))
+
+      # Regla 2: Latencia p95 en ventana de 5m
+      - record: job:gateway_latency_p95:5m
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(gateway_request_duration_seconds_bucket[5m])) by (le)
+          )
+
+      # Regla 3: Throughput en requests por minuto (ventana 5m)
+      - record: job:gateway_throughput:rpm5m
+        expr: sum(rate(gateway_requests_total[5m])) * 60
+
+  # ─── Alertas: Infraestructura ───────────────────────────────────────────────
+  - name: availability_alerts
+    interval: 30s
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: availability
+        annotations:
+          summary: "Target {{ $labels.job }}/{{ $labels.instance }} está DOWN"
+          description: "El target no responde al scraping desde hace más de 1 minuto"
+
+  # ─── Alertas: Microservicios ─────────────────────────────────────────────────
+  - name: microservices_alerts
+    interval: 30s
+    rules:
+      # Alerta 1: Alta tasa de error (> 1%)
+      - alert: HighErrorRate
+        expr: |
+          (sum(rate(gateway_requests_total{status=~"5.."}[5m]))
+           / sum(rate(gateway_requests_total[5m]))) * 100 > 1
+        for: 5m
+        labels:
+          severity: critical
+          component: api-gateway
+        annotations:
+          summary: "Alta tasa de errores en API Gateway"
+          description: "Error rate en {{ $value | humanize }}% (umbral: 1%)"
+
+      # Alerta 2: Servicio caído
+      - alert: ServiceDown
+        expr: up{job=~"api-gateway|auth-service|data-service"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: microservices
+        annotations:
+          summary: "Servicio {{ $labels.job }} está DOWN"
+          description: "{{ $labels.job }} no responde al scraping desde hace más de 1 minuto"
+
+      # Alerta 3: Alta latencia (p95 > 500ms)
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(gateway_request_duration_seconds_bucket[5m])) by (le)
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          component: api-gateway
+        annotations:
+          summary: "Alta latencia en API Gateway"
+          description: "p95 latency: {{ $value }}s (umbral: 500ms)"
+
+      # Alerta 4: Bajo throughput (< 10 req/min)
+      - alert: LowThroughput
+        expr: sum(rate(gateway_requests_total[5m])) * 60 < 10
+        for: 5m
+        labels:
+          severity: warning
+          component: api-gateway
+        annotations:
+          summary: "Bajo throughput en API Gateway"
+          description: "Solo {{ $value | humanize }} req/min (umbral mínimo: 10 req/min)"
+
+      # Alerta 5: Alta tasa de fallos de autenticación (> 15%)
+      - alert: HighAuthFailureRate
+        expr: |
+          (sum(rate(auth_requests_total{status="401"}[5m]))
+           / sum(rate(auth_requests_total[5m]))) * 100 > 15
+        for: 5m
+        labels:
+          severity: warning
+          component: auth-service
+        annotations:
+          summary: "Alta tasa de fallos de autenticación"
+          description: "{{ $value | humanize }}% de requests fallan auth (umbral: 15%)"
