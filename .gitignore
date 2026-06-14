@@ -1,6 +1,5 @@
 # Scripts locales (no se suben al repo)
 traffic-generator.sh
-security-pipeline.sh
 
 # Reportes de seguridad (pueden contener info sensible)
 security-reports/
