@@ -18,7 +18,7 @@ API Gateway (5000) ──► Auth Service (5001)
 
 ## Requisitos
 
-- Podman Desktop instalado y corriendo
+- Podman Desktop instalado y corriendo (Lo realicé con Podman puesto que es más ligero que Docker)
 - podman-compose: `pip install podman-compose`
 
 ## Levantar el proyecto
@@ -40,7 +40,7 @@ podman-compose -f docker-compose-full.yml down
 
 | Servicio       | URL                          |
 |----------------|------------------------------|
-| API Gateway    | http://localhost:5000/api/data |
+| API Gateway    | http://localhost:8080/api/data |
 | Auth Service   | http://localhost:5001/validate |
 | Data Service   | http://localhost:5002/data     |
 | Prometheus     | http://localhost:9090          |
@@ -52,8 +52,18 @@ podman-compose -f docker-compose-full.yml down
 ## Generar tráfico
 
 ```bash
-chmod +x traffic-generator.sh
-./traffic-generator.sh
+while true; do
+  # API Gateway → auth + data
+  curl -s http://localhost:8080/api/data > /dev/null
+  curl -s http://localhost:8080/health > /dev/null
+
+  # Health checks directos
+  curl -s http://localhost:5001/health > /dev/null
+  curl -s http://localhost:5002/health > /dev/null
+
+  echo "Requests enviados — $(date '+%H:%M:%S')"
+  sleep 0.5
+done
 ```
 
 ## Pipeline de Seguridad
@@ -99,25 +109,25 @@ tareaFinal/
 ├── loki-config.yml          # Config Loki
 ├── promtail-config.yml      # Colección de logs por volumen
 ├── security-pipeline.sh     # Pipeline CI/CD de seguridad
-└── traffic-generator.sh     # Generador de tráfico
 ```
 
 ## Preguntas de Reflexión
 
 1. **¿Cómo detectarías un problema de performance?**
-   Usando el dashboard Service Overview: el heatmap de duración muestra latencia acumulada, y la alerta `HighLatency` dispara cuando p95 > 500ms. Con Jaeger se puede ver qué span específico está lento (auth vs data).
+   Yo lo detectaría usando el dashboard Service Overview: el mapa de calor ahí colocado, muestra la latencia acumulada, y la alerta `HighLatency` dispara cuando p95 > 500ms. Por otro lado, con Jaeger se puede ver qué span específico está lento (auth vs data).
 
 2. **¿Qué métrica es más importante: latencia o error rate?**
-   Depende del contexto. Error rate es más urgente (usuarios no pueden usar el servicio), pero latencia alta puede derivar en timeouts que generen errores. Idealmente monitorear ambos con los Golden Signals.
+   Depende del escenario. El "error rate" es más urgente (usuarios no pueden usar el servicio), pero tener una latencia alta puede derivar en timeouts que generen errores. Idealmente monitorear ambos como indican los Golden Signals ayudan.
 
 3. **¿Cómo escalarías para 10,000 req/s?**
-   Horizontal scaling de los microservicios con un load balancer, Redis para caché de auth tokens, connection pooling en data-service, y un service mesh (Istio) para gestionar el tráfico.
+   Haría un escalamiento horizontal de los microservicios, pero consideraría colocar un balanceador, una BD del tipo redis para el caché de auth tokens, si se puede un service mesh (Istio) para gestionar el tráfico.
 
 4. **¿Qué vulnerabilidades identificaste?**
-   - Tokens de auth hardcodeados (simulados como válidos aleatoriamente)
-   - Sin rate limiting en API Gateway
-   - Sin TLS entre servicios internos
+   - Dependencias con CVEs conocidos (trivy encontró CRITICAL=2, HIGH=14 por imagen)
+   - Tokens de auth simulados (sin validación real de JWT)
+   - Sin TLS entre servicios internos (tráfico en texto plano)
    - Sin validación de headers de entrada
+   - Rate limiting implementado (30 req/min) para mitigar abuso
 
 5. **¿Cómo implementarías circuit breaker?**
-   Usando la librería `pybreaker` en api-gateway.py para cada llamada downstream. Si auth-service falla N veces consecutivas, el circuito se abre y se retorna 503 directamente sin esperar timeout.
+   Podría usar la librería `pybreaker` en api-gateway.py para cada llamada downstream. Si auth-service falla N veces consecutivas, el circuito se abre y se retorna 503 directamente sin esperar timeout.
